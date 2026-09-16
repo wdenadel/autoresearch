@@ -17,11 +17,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+
+if cap[0] >= 9:
+    # Hopper (H100) and newer: Flash Attention 3 via kernels hub
+    from kernels import get_kernel
+    _fa3 = get_kernel("varunneal/flash-attention-3").flash_attn_interface
+    def _flash_attn_func(q, k, v, causal, window_size):
+        return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+else:
+    # Ampere (RTX 30xx/40xx) and older: Flash Attention 2
+    from flash_attn import flash_attn_func as _fa2_func
+    def _flash_attn_func(q, k, v, causal, window_size):
+        return _fa2_func(q, k, v, causal=causal, window_size=window_size)
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -90,7 +98,7 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        y = _flash_attn_func(q, k, v, causal=True, window_size=window_size)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
